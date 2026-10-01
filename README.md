@@ -290,7 +290,7 @@ Also review **`pfpn_lookup/spec_check.csv`**: `label_mismatch` rows deserve a lo
 
 ---
 
-## 📚 Key References (for discussuion only)
+## 📚 Key References (for discussion only)
 
 - Burke, W.J., Snapp, S.S., Jayne, T.S. (2020). An in-depth examination of maize yield response to fertilizer in Central Malawi reveals low profits and too many weeds. *Agricultural Economics* 51(6): 923–940.
 - Burke, W.J., Jayne, T.S., Snapp, S.S. (2022). Nitrogen efficiency by soil quality and management regimes on Malawi farms: Can fertilizer use remain profitable? *World Development* 152: 105792.
