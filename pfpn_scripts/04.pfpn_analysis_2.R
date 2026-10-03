@@ -56,8 +56,8 @@ N_max      <- 300    # kg N/ha: above this rates are implausible for Malawian sm
 mad_k      <- 4      # robust outlier threshold (median/MAD on log scale, per wave)
 k_folds    <- 10     # random and curve-fit cross-validation folds
 n_blocks   <- 10     # spatial blocks (k-means on EA coordinates) for spatial CV
-n_boot     <- 200    # EA-cluster bootstrap replicates for curve parameters
-n_trees    <- 500    # trees per random forest
+n_boot     <- 500    # EA-cluster bootstrap replicates for curve parameters
+n_trees    <- 300    # trees per random forest (accuracy usually levels off well before 300)
 shap_nsim    <- 20   # Monte Carlo samples per feature for SHAP values of ALL plots
 shap_check_n <- 30   # plots on which the SHAP values are cross-checked with iml::Shapley
 match_km     <- 30   # trial zone: survey plots within this distance of a trial site ...
@@ -88,6 +88,11 @@ wave_season <- tribble(
 )
 
 render_report <- TRUE
+# Section timer: prints how long each part took
+timer_start <- Sys.time()
+lap <- function(what) {
+  message(sprintf("[time] %s: %.1f min since start", what, as.numeric(difftime(Sys.time(), timer_start, units = "mins"))))
+}
 report_rmd    <- "pfpn_report.Rmd"   # next to the scripts
 analysis1_rds <- pfpn_path("pfpn_analysis", "objects", "analysis1.rds")   # used by the report if present
 
@@ -189,8 +194,7 @@ p <- ggplot(funnel, aes(step, fct_rev(wave), fill = n)) +
   geom_tile(colour = "white") +
   geom_text(aes(label = scales::comma(n)), size = 3) +
   scale_fill_gradient(low = "#fde0dd", high = "#3182bd", name = "rows") +
-  labs(x = NULL, y = NULL, title = "Rows of each LSMS wave through each filtering step",
-       subtitle = "A 0 shows where a wave is lost") +
+  labs(x = NULL, y = NULL, title = "Rows of each LSMS wave through each filtering step") +
   theme(axis.text.x = element_text(angle = 30, hjust = 1), panel.grid = element_blank())
 save_fig(p, "1_wave_coverage_funnel", w = 10, h = 4)
 
@@ -208,8 +212,31 @@ trials <- d0 |>
          season_end = suppressWarnings(as.integer(str_sub(date, 1, 4)))) |>
   filter(N_window)
 
-message(nrow(surv), " survey rows and ", nrow(trials), " trial rows for the PFP-N analysis")
+# Surveys other than LSMS: Carob surveys, EiA crop cuts, RHoMIS, LCAS. Shown by
+# season next to the LSMS waves; robust outliers removed within each survey and year.
+other_label <- c(carob = "Carob survey", EiA = "EiA crop cut", RHoMIS = "RHoMIS", LCAS = "LCAS")
+other_all <- d0 |>
+  filter(is_survey %in% TRUE, program != "LSMS_MWI", crop == focus_crop, !is.na(yield)) |>
+  prep() |>
+  group_by(program, as.integer(str_sub(date, 1, 4))) |>
+  mutate(season_end = suppressWarnings(as.integer(str_sub(date, 1, 4))),
+         survey_group = paste(coalesce(unname(other_label[program]), program),
+                              if_else(program == "LCAS" & yield_source == "crop_cut", "(crop cut)", ""),
+                              coalesce(as.character(season_end-1), ""),
+                              if_else(is.na(season_end), "", "/"),
+                              coalesce(as.character(season_end), "year unknown")) |> 
+           str_squish()) |>
+  ungroup()
+other_surv <- other_all |>
+  filter(!is.na(pfp_n), N_window) |>
+  mutate(z = robust_z(log_pfp), .by = survey_group) |>
+  filter(abs(z) <= mad_k)
+
+message(nrow(surv), " LSMS rows, ", nrow(other_surv), " other survey rows and ", nrow(trials),
+        " trial rows for the PFP-N analysis")
 if (nrow(surv) < 100) stop("Too few survey rows after filtering; see ", file.path(tab_dir, "1_wave_coverage_funnel.csv"))
+
+lap("1. data and coverage funnel")
 
 # -----------------------------------------------------------------------------
 # 2. Data quality by wave, including the N window
@@ -239,15 +266,39 @@ quality <- lsms_maize |>
   mutate(across(starts_with("pct"), \(x) round(x, 1)))
 save_table(quality, "2_quality_by_wave")
 
+lap("2. data quality")
+
 # -----------------------------------------------------------------------------
 # 3. Distributions (linear scales; axis cut at the 99th percentile, count shown)
 # -----------------------------------------------------------------------------
 
-dist_all <- bind_rows(
-  surv |> transmute(group = as.character(wave), class = "Survey (LSMS)", pfp_n, yield, N_fertilizer),
-  trials |> transmute(group = trial_type, class = "Trials", pfp_n, yield, N_fertilizer)
+# Survey groups in time order (LSMS waves and other surveys together), trials last
+survey_order <- bind_rows(
+  surv |> distinct(group = as.character(wave), year = season_end),
+  other_surv |> distinct(group = survey_group, year = season_end)
 ) |>
-  mutate(group = factor(group, levels = c(wave_labels, sort(unique(trials$trial_type)))))
+  bind_rows(tibble(group = setdiff(wave_labels, as.character(unique(surv$wave))),
+                   year = wave_season$season_end[match(setdiff(wave_labels, as.character(unique(surv$wave))),
+                                                       unname(wave_labels[wave_season$source]))])) |>
+  distinct(group, .keep_all = TRUE) |>
+  arrange(year, group)
+# Colour = how yield was measured (surveys) or trial setting
+yield_class <- function(program, yield_source) {
+  case_when(yield_source == "crop_cut" ~ "Survey: crop cut",
+            yield_source == "farmer_report" ~ "Survey: farmer-reported",
+            .default = "Survey: method not recorded")
+}
+trial_class <- c("On-farm trials" = "Trial: on-farm", "On-station trials" = "Trial: on-station",
+                 "Trials (setting unknown)" = "Trial: setting unknown")
+class_colours <- c("Survey: farmer-reported" = "#66c2a5", "Survey: crop cut" = "#fc8d62",
+                   "Survey: method not recorded" = "#e5c494", "Trial: on-farm" = "#8da0cb",
+                   "Trial: on-station" = "#e78ac3", "Trial: setting unknown" = "#b3b3b3")
+dist_all <- bind_rows(
+  surv |> transmute(group = as.character(wave), class = yield_class(program, yield_source), pfp_n, yield, N_fertilizer),
+  other_surv |> transmute(group = survey_group, class = yield_class(program, yield_source), pfp_n, yield, N_fertilizer),
+  trials |> transmute(group = trial_type, class = unname(trial_class[trial_type]), pfp_n, yield, N_fertilizer)
+) |>
+  mutate(group = factor(group, levels = unique(c(survey_order$group, sort(unique(trials$trial_type))))))
 
 # Letters: one-way ANOVA + emmeans + multcomp::cld (Bonferroni; "a" = highest
 # mean) drawn on the figure; pairwise Wilcoxon letters (Bonferroni) kept as a
@@ -263,6 +314,7 @@ violin_box <- function(df, var, lab, name = paste0("3_", var)) {
   save_table(lt_wilcox, paste0(name, "_letters_wilcoxon"))
   lt <- lt_anova |> mutate(group = factor(group, levels = levels(df$group)))
   ggplot(df, aes(group, .data[[var]], fill = class)) +
+    scale_fill_manual(values = class_colours, drop = TRUE) +
     geom_violin(scale = "width", colour = NA, alpha = 0.5) +
     geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
     geom_point(data = lt, aes(group, emmean), inherit.aes = FALSE, shape = 23, size = 2, fill = "black") +
@@ -272,15 +324,16 @@ violin_box <- function(df, var, lab, name = paste0("3_", var)) {
     coord_cartesian(ylim = c(0, cap)) +
     labs(x = NULL, y = lab, fill = NULL,
          caption = paste0("Letters: one-way ANOVA + emmeans, Bonferroni (alpha 0.05); 'a' = highest mean; shared letter = no difference.\n",
-                          "Diamonds: means. Wilcoxon letters: tables/", name, "_letters_wilcoxon.csv.\n",
                           "Axis cut at the 99th percentile (", round(cap), "); ", above, " values above not shown.")) +
     theme(axis.text.x = element_text(angle = 20, hjust = 1))
 }
 save_fig(violin_box(dist_all, "pfp_n", "PFP-N (kg grain / kg N)") +
-           ggtitle(paste0("PFP-N by wave and trial type, sole ", focus_crop, ", N ", N_min, "-", N_max, " kg/ha")),
-         "3_pfp_violin_box", w = 10)
-save_fig(violin_box(dist_all, "yield", "Yield (kg/ha)") + ggtitle("Yield"), "3_yield_violin_box", w = 10)
-save_fig(violin_box(dist_all, "N_fertilizer", "N rate (kg/ha)") + ggtitle("N rate"), "3_N_violin_box", w = 10)
+           ggtitle(paste0("PFP-N by survey and trial type, sole ", focus_crop, ", N ", N_min, "-", N_max, " kg/ha")),
+         "3_pfp_violin_box", w = 12)
+save_fig(violin_box(dist_all, "yield", "Yield (kg/ha)") + ggtitle("Yield"), "3_yield_violin_box", w = 12)
+save_fig(violin_box(dist_all, "N_fertilizer", "N rate (kg/ha)") + ggtitle("N rate"), "3_N_violin_box", w = 12)
+
+lap("3. distributions and letters")
 
 # -----------------------------------------------------------------------------
 # 4. PFP-N response to N: hyperbolic (Eq 02) vs exponential
@@ -338,11 +391,11 @@ derived_at <- \(fit, form) c(
   MP_100 = marginal_curve(fit, form, 100), MP_150 = marginal_curve(fit, form, 150))
 
 # EA-grouped k-fold CV error (PFP-N scale) for one form on one data set
-cv_curve <- function(df, form, k = k_folds) {
+cv_curve <- function(df, form, k = k_folds, start = NULL) {
   eas <- unique(df$cluster)
   fold <- setNames(sample(rep_len(seq_len(k), length(eas))), eas)[df$cluster]
   errs <- map(seq_len(k), \(i) {
-    fit <- fit_curve(df[fold != i, ], form)
+    fit <- fit_curve(df[fold != i, ], form, start = start)
     if (is.null(fit)) return(NULL)
     test <- df[fold == i, ]
     tibble(obs = test$pfp_n, pred = predict_curve(fit, form, test$N_fertilizer))
@@ -378,7 +431,7 @@ curve_results <- curve_groups |>
     map(names(curve_fns), \(form) {
       fit <- fit_curve(df, form)
       if (is.null(fit)) return(NULL)
-      cv <- cv_curve(df, form)
+      cv <- cv_curve(df, form, start = coef(fit))   # folds start from the full-data fit
       bt <- boot_curve(df, form, fit, if (key$group_type == "Pooled") n_boot else ceiling(n_boot / 2))
       pred <- df$pfp_n - predict_curve(fit, form, df$N_fertilizer)
       list(key = mutate(key, form = form, n = nrow(df), clusters = n_distinct(df$cluster)),
@@ -433,6 +486,8 @@ for (gt in unique(curves$group_type)) {
          subtitle = "Points: median PFP-N per 10 kg N bin; lines: fitted Eq 02 (hyperbolic) and exponential forms")
   save_fig(p, paste0("4_curves_", str_to_lower(gt)), w = if (gt == "Wave") 11 else 9, h = if (gt == "Wave") 6 else 4.5)
 }
+
+lap("4. response curves (fits, CV, bootstrap)")
 
 # -----------------------------------------------------------------------------
 # 5. Environmental covariates (optional, cached)
@@ -529,6 +584,8 @@ add_covariates <- function(df) {
 env_vars <- c(names(static_layers), if (length(rain_layers) > 0) "rain_season")
 message("Environmental covariates available: ", if (length(env_vars)) paste(env_vars, collapse = ", ") else "none")
 
+lap("5. environmental covariates")
+
 # -----------------------------------------------------------------------------
 # 6. Random forests with caret (ranger), three CV schemes
 # -----------------------------------------------------------------------------
@@ -558,7 +615,7 @@ rf_data <- surv |>
     centroid      = as.integer(geo_level %in% "district_centroid")
   )
 
-survey_vars  <- c("N_rate", "year", "plot_area_ha", "share_planted", "manure", "urea", "compound")
+survey_vars  <- c("N_rate", "year", "plot_area_ha", "share_planted", "manure") #, "urea", "compound")
 spatial_vars <- c("longitude", "latitude", paste0("ogc_", c(30, 60, 120, 150)))
 env_ok <- env_vars[map_lgl(env_vars, \(v) mean(!is.na(rf_data[[v]])) > 0.8)]
 
@@ -598,18 +655,22 @@ p <- ggplot(rf_data |> distinct(cluster, .keep_all = TRUE), aes(longitude, latit
   labs(colour = "block", title = "Spatial CV blocks (k-means on EA coordinates)", x = NULL, y = NULL)
 save_fig(p, "6_spatial_cv_blocks", w = 5, h = 8)
 
+# No variable importance during tuning and cross-validation: permutation
+# importance re-predicts the out-of-bag data once per predictor and made each of
+# the ~230 CV fits many times slower. It is computed once, on the final model.
+n_threads <- max(1, parallel::detectCores() - 1)
 train_rf <- function(vars, index, grid) {
   caret::train(
     x = as.data.frame(rf_data[, vars]), y = rf_data$log_pfp,
     method = "ranger", metric = "RMSE", tuneGrid = grid,
     trControl = caret::trainControl(method = "cv", index = index, savePredictions = "final"),
-    num.trees = n_trees, importance = "permutation")
+    num.trees = n_trees, importance = "none", num.threads = n_threads)
 }
 
 rf_runs <- imap(predictor_sets, \(vars, set_name) {
   message("Random forest: ", set_name, " (", length(vars), " predictors)")
   p <- length(vars)
-  grid <- expand.grid(mtry = unique(pmax(1, round(c(1/3, 1/2, 2/3) * p))),
+  grid <- expand.grid(mtry = unique(pmax(1, round(c(1/3, 2/3) * p))),
                       splitrule = "variance", min.node.size = c(5, 25))
   # tune on spatial blocks (the honest scheme), then evaluate every scheme with the chosen settings
   tuned <- train_rf(vars, cv_schemes[["Spatial blocks"]], grid)
@@ -642,9 +703,13 @@ p <- ggplot(rf_metrics, aes(cv_scheme, r2_log, fill = predictors)) +
 save_fig(p, "6_rf_cv_metrics")
 
 final <- rf_runs[[length(rf_runs)]]
-imp <- caret::varImp(final$model, scale = FALSE)$importance |>
-  rownames_to_column("variable") |>
-  rename(importance = Overall) |>
+lap("random forests (tuning + 3 CV schemes x 3 predictor sets)")
+# Permutation importance: one refit of the final model with the tuned settings
+imp_fit <- ranger::ranger(x = as.data.frame(rf_data[, final$vars]), y = rf_data$log_pfp,
+                          num.trees = n_trees, mtry = final$best$mtry, min.node.size = final$best$min.node.size,
+                          splitrule = as.character(final$best$splitrule), importance = "permutation",
+                          num.threads = n_threads)
+imp <- tibble(variable = names(imp_fit$variable.importance), importance = unname(imp_fit$variable.importance)) |>
   mutate(group = case_when(variable %in% survey_vars ~ "survey", variable %in% spatial_vars ~ "space",
                            .default = "environment")) |>
   arrange(desc(importance))
@@ -665,6 +730,7 @@ X_all <- as.data.frame(rf_data[, final$vars])
 pred_log <- \(d) predict(final$model, newdata = d)
 message("SHAP values for all ", nrow(X_all), " plots (", shap_nsim, " Monte Carlo samples per predictor)")
 phi <- mc_shapley(pred_log, X_all, nsim = shap_nsim)
+lap("SHAP values for all plots")
 base_log <- mean(pred_log(X_all))
 
 shap <- as_tibble(phi) |>
@@ -746,7 +812,7 @@ p <- ggplot(pd_other, aes(value, pfp)) +
   geom_point(data = pd_means, colour = "firebrick", size = 2.5) +
   geom_hline(yintercept = exp(base_log), linetype = 2, colour = "grey50") +
   facet_wrap(~variable, scales = "free_x") +
-  labs(x = NULL, y = "PFP-N (kg/kg), SHAP-based", title = "SHAP-based partial dependence of PFP-N",
+  labs(x = NULL, y = "PFP-N (kg/kg), SHAP-based", title = "Partial dependence of PFP-N",
        subtitle = "Every plot: exp(mean prediction + SHAP of the predictor); dashed: mean prediction")
 save_fig(p, "6_rf_partial_dependence", w = 10, h = 6)
 
@@ -798,6 +864,14 @@ if (map_ok) {
   message("Prediction maps skipped: some covariates are not available as rasters")
 }
 
+# District boundaries for the map (optional: geodata)
+bnd <- if (requireNamespace("geodata", quietly = TRUE)) {
+  tryCatch(sf::st_as_sf(geodata::gadm("MWI", level = 1, path = file.path(cov_cache, "geodata"))),
+           error = \(e) NULL)
+} else NULL
+
+lap("6. random forests, SHAP, maps")
+
 # -----------------------------------------------------------------------------
 # 7. PFP-N by wave and region (all waves shown)
 # -----------------------------------------------------------------------------
@@ -846,6 +920,51 @@ p <- ggplot(filter(region_tbl, !is.na(region)), aes(wave, median_pfp_n, ymin = c
   labs(x = NULL, y = "Median PFP-N (kg/kg)", colour = NULL, title = "PFP-N by region and wave")
 save_fig(p, "7_pfp_by_region_wave")
 
+# Map of N use (kg N/ha) per year: mean over ALL sole-maize plots of each place
+# (unfertilized plots count as 0), LSMS EAs and other surveys; linear scale.
+n_use <- bind_rows(
+  lsms_maize |>
+    filter(!is.na(N_fertilizer), N_fertilizer <= N_max, !is.na(latitude), !is.na(longitude)) |>
+    left_join(wave_season, by = "source") |>
+    transmute(survey = as.character(wave), year = season_end, place = cluster, latitude, longitude,
+              geo_level, N_fertilizer),
+  other_all |>
+    filter(!is.na(N_fertilizer), N_fertilizer <= N_max, !is.na(latitude), !is.na(longitude)) |>
+    transmute(survey = survey_group, year = season_end,
+              place = paste(program, round(latitude, 2), round(longitude, 2)), latitude, longitude,
+              geo_level, N_fertilizer)
+) |>
+  filter(!is.na(year))
+if (nrow(n_use) > 0) {
+  n_use_place <- n_use |>
+    summarise(plots = n(), mean_N = mean(N_fertilizer), pct_fertilized = 100 * mean(N_fertilizer > 0),
+              latitude = mean(latitude), longitude = mean(longitude),
+              geo_level = first(geo_level), .by = c(year, survey, place))
+  save_table(n_use_place, "7_N_use_by_place_year")
+  n_use_year <- n_use |>
+    summarise(plots = n(), places = n_distinct(place), mean_N = mean(N_fertilizer),
+              median_N = median(N_fertilizer), pct_fertilized = 100 * mean(N_fertilizer > 0),
+              mean_N_fertilized = mean(N_fertilizer[N_fertilizer > 0]),
+              surveys = paste(sort(unique(survey)), collapse = "; "), .by = year) |>
+    arrange(year)
+  save_table(n_use_year, "7_N_use_by_year")
+  p <- ggplot() +
+    { if (!is.null(bnd)) geom_sf(data = bnd, fill = "grey95", colour = "grey70", linewidth = 0.2) } +
+    geom_point(data = n_use_place, aes(longitude, latitude, colour = mean_N,
+                                       shape = geo_level %in% "district_centroid"), size = 1.4, alpha = 0.85) +
+    scale_colour_viridis_c(name = "mean N\n(kg/ha)", limits = c(0, NA)) +
+    scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 1), labels = c(`FALSE` = "EA / field", `TRUE` = "district centroid"),
+                       name = NULL) +
+    facet_wrap(~year, nrow = 1) +
+    coord_sf() +
+    labs(x = NULL, y = NULL, title = paste0("Mineral N use on sole ", focus_crop, " by year"),
+         subtitle = "Mean kg N/ha over all plots of each place, unfertilized plots counted as 0") +
+    theme(axis.text = element_blank(), panel.grid = element_blank(), legend.position = "bottom")
+  save_fig(p, "7_N_use_map_by_year", w = max(8, 2.2 * n_distinct(n_use_place$year)), h = 7)
+}
+
+lap("7. PFP-N by wave and region, N-use map")
+
 # -----------------------------------------------------------------------------
 # 8. Survey plots near trials: PFP-N patterns and agronomic use efficiency
 # -----------------------------------------------------------------------------
@@ -865,12 +984,6 @@ save_fig(p, "7_pfp_by_region_wave")
 #            exact on the wave. Matching balances OBSERVED characteristics only:
 #            if farmers who fertilize also have better soils or management, the
 #            survey AUE-N is biased upwards.
-
-# District boundaries for the map (optional: geodata)
-bnd <- if (requireNamespace("geodata", quietly = TRUE)) {
-  tryCatch(sf::st_as_sf(geodata::gadm("MWI", level = 1, path = file.path(cov_cache, "geodata"))),
-           error = \(e) NULL)
-} else NULL
 
 trials_all <- d0 |>
   filter(program == "carob", crop == focus_crop, !is.na(yield), yield > 0, !is.na(N_fertilizer),
@@ -953,8 +1066,8 @@ if (zone_ok) {
   zone_pfp <- bind_rows(
     geo_sv |> filter(treat == 1, !is.na(pfp_n), !outlier) |>
       transmute(group = if_else(in_zone, paste0("Survey: within ", match_km, " km of trials"), "Survey: outside trial zones"),
-                class = "Survey (LSMS)", pfp_n, yield, N_fertilizer, wave = as.character(wave)),
-    trials |> transmute(group = trial_type, class = "Trials", pfp_n, yield, N_fertilizer, wave = NA_character_)
+                class = "Survey: farmer-reported", pfp_n, yield, N_fertilizer, wave = as.character(wave)),
+    trials |> transmute(group = trial_type, class = unname(trial_class[trial_type]), pfp_n, yield, N_fertilizer, wave = NA_character_)
   ) |>
     mutate(group = factor(group, levels = c("Survey: outside trial zones", paste0("Survey: within ", match_km, " km of trials"),
                                             sort(unique(trials$trial_type)))))
@@ -1106,6 +1219,8 @@ if (nrow(psm_balance)) {
   save_fig(p, "8_psm_balance", w = 10)
 }
 
+lap("8. trial zones and AUE-N")
+
 # -----------------------------------------------------------------------------
 # 9. Results object and report
 # -----------------------------------------------------------------------------
@@ -1125,6 +1240,8 @@ results <- list(
   match_km = match_km, match_years = match_years, zone_ok = zone_ok,
   zone_tbl = if (zone_ok) zone_tbl else NULL, zone_wave = if (zone_ok) zone_wave else NULL,
   zone_test = if (zone_ok) zone_test else NULL, aue_tbl = aue_tbl, psm_info = psm_info,
+  n_use_year = if (exists("n_use_year")) n_use_year else NULL,
+  other_surveys = other_surv |> count(survey_group, program, yield_source, name = "plots"),
   wave_tbl = wave_tbl, region_tbl = region_tbl,
   fig_dir = normalizePath(fig_dir), tab_dir = normalizePath(tab_dir)
 )

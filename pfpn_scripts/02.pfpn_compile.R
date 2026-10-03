@@ -117,6 +117,26 @@ lcas_datasets <- tribble(
 # Carob collections to include [verified: URL pattern from caramba source]
 carob_groups    <- c("agronomy", "survey")
 carob_countries <- 'Malawi'         # e.g. c("Malawi", "Zambia"); NULL keeps all
+
+# Other surveys you downloaded yourself (NA = not used)
+# EiA 2022 maize survey: crop-cut yields, field GPS, N rate per field. Workbook
+# with sheets maize_clean_data + raw_survey_data (CIMMYT Dataverse, terms of use
+# accepted at download; doi:10.71682/10549347 [assumed: the dataset you shared]).
+eia_xlsx           <- '../../../Pele_Mele/EiA_2022_survey_2025-09-26_v0.xlsx'  # adapt to local
+eia_countries      <- "Malawi"    # NULL keeps Mozambique and Zambia too
+eia_yield_moisture <- 12          # EiA yields are grain dry matter; converted to this moisture (%) (NA = keep dry matter)
+# RHoMIS (Harvard Dataverse doi:10.7910/DVN/WS38SA, CC0): household survey with
+# fertilizer recorded for the whole household and year, not per crop. Only
+# households whose fertilizer went to maize alone and who used one product give
+# an (approximate, household-level) maize N rate. CSV with the codebook's column names.
+rhomis_csv         <- NA          # OPTIONAL: leave NA until you have the file, e.g. "../../data/RHoMIS_Full_Data.csv"
+rhomis_countries   <- "Malawi"
+
+# Sharing bundle (pfpn_compiled/share/): documentation, lookup and conversion
+# tables are always included; the plot-level data only if share_data is TRUE.
+# The LSMS microdata terms restrict redistribution: share the data only with
+# colleagues who have accepted those terms themselves.
+share_data <- FALSE
 carob_url <- function(group) sprintf("https://geodata.ucdavis.edu/carob/carob_%s_latest-cc.zip", group)
 
 # This is just a selection of CAROB datasets
@@ -818,8 +838,9 @@ if (nrow(carob) > 0) {
       across(c(yield, N_fertilizer, fertilizer_amount, plot_area, intercrop_fraction,
                yield_moisture, latitude, longitude), \(x) suppressWarnings(as.numeric(x))),
       across(c(crop_cut, is_survey, on_farm, intercropped, fertilizer_used, irrigated), to_logical),
+      # Carob surveys do not record how yield was measured
       yield_source = case_when(crop_cut %in% TRUE ~ "crop_cut",
-                               is_survey %in% TRUE ~ "farmer_report",
+                               is_survey %in% TRUE ~ "survey (method not recorded)",
                                .default = "experiment"),
       plot_id = coalesce(plot_id, trial_id),
       geo_uncertainty = suppressWarnings(as.numeric(geo_uncertainty)),
@@ -837,6 +858,157 @@ if (nrow(carob) > 0) {
 }
 
 # -----------------------------------------------------------------------------
+# 6b. Other surveys: EiA 2022 (crop cuts) and RHoMIS (household approximation)
+# -----------------------------------------------------------------------------
+
+# Excel serial day (as text or number) or ISO date -> Date
+excel_date <- function(x) {
+  num <- suppressWarnings(as.numeric(x))
+  out <- as.Date(num, origin = "1899-12-30")
+  # each value parsed on its own (as.Date picks one format for a whole vector)
+  iso <- as.Date(vapply(str_sub(as.character(x), 1, 10),
+                        \(v) as.character(as.Date(v, optional = TRUE)), character(1), USE.NAMES = FALSE))
+  if_else(is.na(out), iso, out)
+}
+
+read_eia <- function(path) {
+  m <- readxl::read_excel(path, sheet = "maize_clean_data")
+  raw <- readxl::read_excel(path, sheet = "raw_survey_data", col_types = "text") |>
+    transmute(X_uuid,
+              latitude  = suppressWarnings(as.numeric(`_field_gps_latitude`)),
+              longitude = suppressWarnings(as.numeric(`_field_gps_longitude`)),
+              geo_uncertainty = suppressWarnings(as.numeric(`_field_gps_precision`)),   # m
+              interview = excel_date(today)) |>
+    distinct(X_uuid, .keep_all = TRUE)
+  m |>
+    left_join(raw, by = "X_uuid") |>
+    filter(is.null(eia_countries) | country %in% eia_countries) |>
+    mutate(
+      year = as.integer(format(interview, "%Y")),
+      bad_xy = country == "Malawi" & !is.na(latitude) & !in_malawi(longitude, latitude)
+    ) |>
+    transmute(
+      program = "EiA", source = "EiA_2022_survey", dataset_id = "doi:10.71682/10549347",
+      country, adm2 = district, adm3 = epa,
+      latitude = if_else(bad_xy, NA_real_, latitude), longitude = if_else(bad_xy, NA_real_, longitude),
+      geo_level = if_else(is.na(latitude), NA_character_, "field GPS"),
+      geo_uncertainty = if_else(is.na(latitude), NA_real_, geo_uncertainty),
+      coords_invalid = bad_xy,
+      date = as.character(year), season = "wet",
+      hhid = as.character(farmer_id), plot_id = X_uuid, crop = "maize", crop_label = "maize", yield_part = "grain",
+      crop_stand = "unknown",                    # the survey does not record intercropping
+      plot_area = plot_geotraced_area_m2, area_source = "gps",
+      fertilizer_used = nfert_kgha > 0, N_fertilizer = nfert_kgha, n_complete = TRUE,
+      OM_used = to_logical(orgfert_yn),
+      # grain dry matter -> eia_yield_moisture % moisture (terminag maize fresh moisture is 12 %)
+      yield = if (is.na(eia_yield_moisture)) maize_yield_kgha else maize_yield_kgha / (1 - eia_yield_moisture / 100),
+      yield_moisture = if (is.na(eia_yield_moisture)) 0 else eia_yield_moisture,
+      yield_source = "crop_cut", crop_cut = TRUE, is_survey = TRUE, on_farm = TRUE
+    ) |>
+    filter(!is.na(yield))
+}
+
+# RHoMIS: one row per household (its maize). Conversion tables in pfpn_config/:
+#   area_unit_m2.csv (land units), rhomis_land_share.csv (share of land under
+#   maize), fert_unit_kg.csv (fertilizer units), fertilizer_n.csv (products).
+read_rhomis <- function(path) {
+  d <- read_csv(path, col_types = cols(.default = "c"), show_col_types = FALSE)
+  if (!is.null(rhomis_countries)) {
+    d <- d |> filter(str_to_lower(country) %in% str_to_lower(rhomis_countries))
+  }
+  if (nrow(d) == 0) { message("RHoMIS: no households in ", paste(rhomis_countries, collapse = ", ")); return(NULL) }
+  crops <- d |>
+    select(id_unique, matches("^crop_(name|harvest_kg_per_year|land_area|intercrop)_\\d+$")) |>
+    pivot_longer(-id_unique, names_to = c(".value", "k"),
+                 names_pattern = "^(crop_name|crop_harvest_kg_per_year|crop_land_area|crop_intercrop)_(\\d+)$") |>
+    filter(str_detect(str_to_lower(coalesce(crop_name, "")), "maize|corn")) |>
+    slice_head(n = 1, by = id_unique)
+  hh <- d |>
+    select(any_of(c("id_unique", "year", "country", "region", "sublocation", "gps_lat_rounded", "gps_lon_rounded",
+                    "gps_source", "landcultivated", "unitland", "fertiliser_crops", "fertiliser_amount",
+                    "fertiliser_units", "fertiliser_type"))) |>
+    ensure(c("gps_source", "fertiliser_crops", "fertiliser_amount", "fertiliser_units", "fertiliser_type"))
+  x <- inner_join(hh, crops, by = "id_unique") |>
+    mutate(source = "RHoMIS", area_unit = unitland, fertilizer_unit = fertiliser_units)
+
+  land_m2 <- x |> distinct(source, area_unit) |> filter(!is.na(area_unit)) |>
+    sync_table("area_unit_m2.csv", observed = _, "m2_per_unit", prefill = prefill_m2)
+  share <- x |> distinct(source, intercrop_fraction = crop_land_area) |> filter(!is.na(intercrop_fraction)) |>
+    sync_table("rhomis_land_share.csv", observed = _, "fraction", prefill = prefill_frac)
+  funit <- x |> distinct(source, fertilizer_unit) |> filter(!is.na(fertilizer_unit)) |>
+    sync_table("fert_unit_kg.csv", observed = _, "kg_per_unit", prefill = \(d) prefill_kg(d, "fertilizer_unit"))
+  ftypes <- x |> pull(fertiliser_type) |> str_split("\\s+") |> unlist() |> na.omit() |> unique()
+  fn <- if (length(ftypes)) sync_table("fertilizer_n.csv", observed = tibble(value_label = ftypes), "N_pct", ci = TRUE) else NULL
+
+  tokens <- \(v) str_split(str_to_lower(coalesce(v, "")), "\\s+")
+  x |>
+    left_join(select(land_m2, source, area_unit, m2_per_unit), by = c("source", "area_unit"), na_matches = "never") |>
+    left_join(transmute(share, source, crop_land_area = intercrop_fraction, fraction), by = c("source", "crop_land_area"),
+              na_matches = "never") |>
+    left_join(select(funit, source, fertilizer_unit, kg_per_unit), by = c("source", "fertilizer_unit"), na_matches = "never") |>
+    mutate(
+      crop_tokens  = tokens(fertiliser_crops),
+      type_tokens  = tokens(fertiliser_type),
+      fert_any     = map_lgl(crop_tokens, \(t) any(t != "")),
+      maize_only   = map_lgl(crop_tokens, \(t) length(t[t != ""]) > 0 && all(str_detect(t[t != ""], "maize|corn"))),
+      single_type  = map_lgl(type_tokens, \(t) length(t[t != ""]) == 1),
+      fert_type    = map_chr(type_tokens, \(t) if (length(t[t != ""]) == 1) t[t != ""] else NA_character_),
+      area_ha      = suppressWarnings(as.numeric(landcultivated)) * m2_per_unit / 1e4 * fraction,
+      harvest_kg   = suppressWarnings(as.numeric(crop_harvest_kg_per_year)),
+      fert_kg      = suppressWarnings(as.numeric(fertiliser_amount)) * kg_per_unit
+    ) |>
+    left_join(if (is.null(fn)) tibble(fert_key = character(), N_pct = numeric())
+              else transmute(fn, fert_key = ci_key(value_label), N_pct) |> distinct(fert_key, .keep_all = TRUE),
+              by = c("fert_type" = "fert_key"), na_matches = "never") |>
+    mutate(
+      N_fertilizer = case_when(
+        !fert_any ~ 0,                                                # no fertilizer on any crop
+        maize_only & single_type & !is.na(N_pct) ~ fert_kg * N_pct / 100 / area_ha,
+        .default = NA_real_),                                         # shared with other crops or several products
+      lat = suppressWarnings(as.numeric(gps_lat_rounded)), lon = suppressWarnings(as.numeric(gps_lon_rounded)),
+      bad_xy = !is.na(lat) & str_to_lower(country) == "malawi" & !in_malawi(lon, lat),
+      centroid = str_detect(str_to_lower(coalesce(gps_source, "")), "centroid|subloc")
+    ) |>
+    transmute(
+      program = "RHoMIS", source = "RHoMIS", dataset_id = "doi:10.7910/DVN/WS38SA",
+      country, adm1 = region, adm2 = sublocation,
+      latitude = if_else(bad_xy, NA_real_, lat), longitude = if_else(bad_xy, NA_real_, lon),
+      geo_level = case_when(is.na(latitude) ~ NA_character_, centroid ~ "sublocation centroid",
+                            .default = "rounded GPS (2 decimals)"),
+      geo_uncertainty = if_else(!is.na(latitude) & !centroid, 780, NA_real_),   # max error of 0.005 deg rounding
+      coords_invalid = bad_xy,
+      date = as.character(year), season = "wet", hhid = id_unique, plot_id = "maize", crop = "maize",
+      crop_label = crop_name, yield_part = "grain",
+      crop_stand = case_when(to_logical(crop_intercrop) %in% TRUE ~ "intercrop",
+                             to_logical(crop_intercrop) %in% FALSE ~ "sole", .default = "unknown"),
+      intercrop_fraction = fraction, plot_area = area_ha * 1e4, area_source = "farmer_report",
+      fertilizer_used = fert_any, fertilizer_type = fert_type, N_fertilizer,
+      n_complete = !is.na(N_fertilizer),
+      yield = harvest_kg / area_ha, yield_source = "farmer_report", crop_cut = FALSE,
+      is_survey = TRUE, on_farm = TRUE
+    ) |>
+    filter(!is.na(yield), is.finite(yield))
+}
+
+other_surveys <- list()
+if (!is.na(eia_xlsx)) {
+  if (file.exists(eia_xlsx)) {
+    other_surveys$eia <- read_eia(eia_xlsx)
+    message("EiA 2022: ", nrow(other_surveys$eia), " maize fields")
+  } else message("EiA workbook not found, skipped: ", eia_xlsx)
+}
+if (is.na(rhomis_csv)) {
+  message("RHoMIS not used (rhomis_csv is NA): set its path in pfpn_compile.R once you have the file")
+} else {
+  if (file.exists(rhomis_csv)) {
+    other_surveys$rhomis <- read_rhomis(rhomis_csv)
+    if (!is.null(other_surveys$rhomis)) message("RHoMIS: ", nrow(other_surveys$rhomis), " households with maize yield (",
+                                                sum(!is.na(other_surveys$rhomis$N_fertilizer)), " with an N rate)")
+  } else message("RHoMIS file not found, skipped: ", rhomis_csv)
+}
+other_surveys <- compact(other_surveys) |> list_rbind()
+
+# -----------------------------------------------------------------------------
 # 7. Unify, PFP-N, QC against terminag ranges
 # -----------------------------------------------------------------------------
 
@@ -852,7 +1024,8 @@ final_cols <- c("program", "source", "dataset_id", "country", "adm1", "adm2", "a
 
 all_rows <- bind_rows(
   survey_unified |> mutate(across(any_of(c("date", "plot_id", "hhid")), as.character)),
-  carob
+  carob,
+  other_surveys
 ) |>
   ensure(c("crop_stand", "area_source", "intercrop_fraction", "fert_kg_mismatch", "fert_kg_source",
            "n_complete", "harvest_block", "geo_level", "yield_source", "coords_invalid"))
@@ -874,6 +1047,8 @@ unified <- all_rows |>
     quality_flags = pmap_chr(
       list(
         flag(area_source == "farmer_report", "area_farmer_reported"),
+        flag(program == "RHoMIS", "household_level_N_and_area"),
+        flag(yield_source == "survey (method not recorded)", "yield_method_not_recorded"),
         flag(intercrop_fraction < 1, "partly_planted"),
         flag(str_detect(crop_stand, "inferred"), "stand_inferred"),
         flag(crop_stand == "unknown", "stand_unknown"),
@@ -930,8 +1105,8 @@ unified$qc_out_of_range <- if (length(qc) == 0) NA_character_ else
 # Per-column documentation. `unit` = NA falls back to terminag's unit.
 col_doc <- tribble(
   ~variable,          ~label,                                   ~unit,          ~derivation,
-  "program",          "Data programme",                         NA,             "LSMS_MWI, LCAS or carob",
-  "source",           "Source dataset / survey wave",           NA,             "LSMS: LSMS_<catalog id>_<years>; LCAS: dataset name; Carob: carob_<collection>",
+  "program",          "Data programme",                         NA,             "LSMS_MWI, LCAS, carob, EiA or RHoMIS",
+  "source",           "Source dataset / survey wave",           NA,             "LSMS: LSMS_<catalog id>_<years>; LCAS: dataset name; Carob: carob_<collection>; EiA_2022_survey; RHoMIS",
   "dataset_id",       "Dataset identifier",                     NA,             "Carob dataset_id; for surveys equal to source",
   "country",          "Country",                                NA,             "LSMS/LCAS: from configuration; Carob: as published",
   "adm1",             "Administrative level 1",                 NA,             "LSMS: region (hh_mod_a_filt)",
@@ -968,7 +1143,7 @@ col_doc <- tribble(
   "organic_qty",      "Organic fertilizer quantity",            "see organic_unit", "LSMS ag_d37a; not converted to kg",
   "organic_unit",     "Unit of organic fertilizer quantity",    NA,             "LSMS ag_d37b label",
   "harvest_block",    "Harvest question block used",            NA,             "main, or alt (IHS3 / IHPS 2013 ag_g09 block, used where ag_g13 is empty)",
-  "yield_source",     "Yield measurement method",               NA,             "farmer_report, crop_cut or experiment (Carob trials). Do not pool without accounting for method",
+  "yield_source",     "Yield measurement method",               NA,             "farmer_report, crop_cut (LCAS, EiA), survey (method not recorded) (Carob surveys) or experiment (Carob trials). Do not pool without accounting for method",
   "crop_cut",         "Yield from crop cut",                    NA,             "TRUE when yield_source is crop_cut",
   "yield",            "Yield",                                  "kg/ha",        "Surveys: harvest kg (harvest_unit_kg.csv) / planted area, or reported/crop-cut yield; Carob as published. Moisture basis in yield_moisture where known",
   "yield_moisture",   "Moisture content of the yield",          "%",            "Crop cuts where recorded; unknown for farmer reports",
@@ -976,7 +1151,7 @@ col_doc <- tribble(
   "is_survey",        "Survey data",                            NA,             "TRUE for LSMS and LCAS; Carob as published",
   "on_farm",          "On-farm",                                NA,             "TRUE for LSMS and LCAS; Carob as published",
   "treatment",        "Experimental treatment",                 NA,             "Carob trials only",
-  "quality_flags",    "Data-quality flags",                     NA,             "Flags separated by '; ' (see data_quality_statement.md): area_farmer_reported, partly_planted, stand_inferred, stand_unknown, fert_kg_mismatch, fert_kg_from_unit_conversion, N_unknown_product, N_below_<threshold>, harvest_second_block, location_district_centroid, coords_outside_malawi_discarded",
+  "quality_flags",    "Data-quality flags",                     NA,             "Flags separated by '; ' (see data_quality_statement.md): area_farmer_reported, household_level_N_and_area, yield_method_not_recorded, partly_planted, stand_inferred, stand_unknown, fert_kg_mismatch, fert_kg_from_unit_conversion, N_unknown_product, N_below_<threshold>, harvest_second_block, location_district_centroid, coords_outside_malawi_discarded",
   "qc_out_of_range",  "Values outside terminag valid range",    NA,             "Names of variables outside terminag valid_min/valid_max (plot_area not checked for surveys)"
 )
 
@@ -1141,6 +1316,12 @@ writeLines(c(
   "  (categorical in most waves), which adds error to both yield and N per hectare.",
   "- **Crop cuts** (LCAS) measure a small sampled area and scale up; they avoid recall and",
   "  unit problems but are sensitive to where the quadrats fall and to moisture adjustment.",
+  "- **EiA 2022 crop cuts** report grain dry matter; it is converted to the moisture set in",
+  "  `eia_yield_moisture` so it compares with air-dry farmer reports. Intercropping is not recorded.",
+  "- **RHoMIS** records fertilizer for the whole household and year and crop area as a share of",
+  "  the land: N rate and yield are household-level approximations (`household_level_N_and_area`),",
+  "  computed only where fertilizer went to maize alone and one product was used.",
+  "- **Carob surveys** do not record how yield was measured (`yield_method_not_recorded`).",
   "",
   "## PFP-N (ratio)",
   "",
@@ -1167,6 +1348,89 @@ message("Data quality statement: ", file.path(out_dir, "data_quality_statement.m
 if (nrow(missing_conv) > 0) {
   message("\n", nrow(missing_conv), " conversion rows still empty -> ",
           file.path(out_dir, "missing_conversions.csv"), ". Fill them in ", cfg_dir, " and re-run.")
+}
+
+# -----------------------------------------------------------------------------
+# 10. Sharing bundle for colleagues: pfpn_compiled/share/ (+ zip if available)
+# -----------------------------------------------------------------------------
+
+share_dir <- file.path(out_dir, "share")
+unlink(share_dir, recursive = TRUE)
+dir.create(file.path(share_dir, "lookup"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(share_dir, "conversion_tables"), showWarnings = FALSE)
+
+copy_to <- function(files, dest) {
+  files <- files[file.exists(files)]
+  invisible(file.copy(files, dest, overwrite = TRUE))
+  basename(files)
+}
+docs <- copy_to(file.path(out_dir, c("pfpn_unified_dictionary.csv", "data_quality_statement.md",
+                                     "summary_by_source.csv", "crop_stand_summary.csv", "missing_conversions.csv")),
+                share_dir)
+lookups <- copy_to(c(file.path(cfg_dir, "source_map.csv"), file.path(lookup_dir, "spec_check.csv"),
+                     list.files(lookup_dir, "^data_dictionary_.*\\.csv$", full.names = TRUE),
+                     file.path(lookup_dir, "value_labels.csv")),
+                   file.path(share_dir, "lookup"))
+convs <- copy_to(setdiff(list.files(cfg_dir, "\\.csv$", full.names = TRUE), file.path(cfg_dir, "source_map.csv")),
+                 file.path(share_dir, "conversion_tables"))
+data_files <- if (share_data) copy_to(file.path(out_dir, c("pfpn_unified.csv", "pfpn_unified.rds")), share_dir) else character()
+
+src_counts <- unified |> count(program, source, yield_source, name = "rows") |> arrange(program, source)
+writeLines(c(
+  "# PFP-N unified dataset: documentation for reviewers",
+  "",
+  paste0("Prepared ", format(Sys.time(), "%Y-%m-%d"), " by pfpn_compile.R. ",
+         nrow(unified), " rows (sole crops, one row per plot-crop x yield measurement), ", ncol(unified), " columns."),
+  "",
+  "## Files",
+  "",
+  "| File | Content |",
+  "|---|---|",
+  if (share_data) "| `pfpn_unified.csv` / `.rds` | the dataset (the `.rds` carries labels, units and derivations as column attributes) |"
+  else "| *(dataset not included)* | set `share_data <- TRUE` in pfpn_compile.R to include it (see Terms below) |",
+  "| `pfpn_unified_dictionary.csv` | one row per column: label, type, unit, terminag term and definition, derivation, observed values, % missing |",
+  "| `data_quality_statement.md` | error sources for N, yield and PFP-N, with indicators per source |",
+  "| `summary_by_source.csv`, `crop_stand_summary.csv` | rows, yields, N and PFP-N per source; rows kept/dropped by crop stand |",
+  "| `missing_conversions.csv` | units, products or categories still without a conversion value |",
+  "| `lookup/source_map.csv` | **the lookup table**: for each survey round, which source file and variable fills which role (household, plot, crop, harvest, area, fertilizer type/quantity/unit/kg, organic inputs, location) |",
+  "| `lookup/spec_check.csv` | each mapped variable checked against the round's DDI codebook: ok / label_mismatch / missing, with the codebook label |",
+  "| `lookup/data_dictionary_<round>.csv` | every variable of the source files used, per round (codebook order) |",
+  "| `lookup/value_labels.csv` | codes and labels of the categorical source variables used |",
+  "| `conversion_tables/*.csv` | unit weights (harvest, fertilizer), area units, crop shares, fertilizer N contents, crop names, district centroids |",
+  "",
+  "## Rows by source",
+  "",
+  "| program | source | yield measurement | rows |", "|---|---|---|---|",
+  paste0("| ", src_counts$program, " | ", src_counts$source, " | ", src_counts$yield_source, " | ", src_counts$rows, " |"),
+  "",
+  "## Feedback wanted",
+  "",
+  "- Is each variable in `lookup/source_map.csv` the right one for its role, in every round?",
+  "- Are the unit weights and fertilizer N contents in `conversion_tables/` plausible?",
+  "- Are the derivations in the dictionary (yield, N rate, PFP-N, flags) correct?",
+  "",
+  "## Terms",
+  "",
+  "Each source keeps its own licence and terms; nothing here changes them. Malawi LSMS-ISA microdata (World Bank",
+  "Microdata Library) are used under its terms of use, which restrict redistribution: the plot-level rows derived",
+  "from them should go only to people who have accepted those terms. Carob datasets keep the licence of their",
+  "original publication; EiA 2022 data are used under the terms accepted at download from the CIMMYT repository;",
+  "RHoMIS is released under CC0. Code: GNU GPL v3."
+), file.path(share_dir, "README_data.md"))
+
+# absolute path: the zip is written from inside share_dir
+zip_file <- file.path(normalizePath(out_dir), paste0("pfpn_share_", format(Sys.Date(), "%Y%m%d"), ".zip"))
+if (nzchar(Sys.which("zip"))) {
+  if (file.exists(zip_file)) file.remove(zip_file)
+  old <- setwd(share_dir)
+  tryCatch(utils::zip(zip_file, files = list.files(".", recursive = TRUE), flags = "-qr"),
+           finally = setwd(old))
+}
+if (file.exists(zip_file)) {
+  message("Sharing bundle: ", zip_file, if (!share_data) " (documentation and lookup only; set share_data <- TRUE to add the data)")
+} else {
+  message("Sharing bundle: ", share_dir, " (no zip tool found; zip the folder yourself)",
+          if (!share_data) "; documentation and lookup only, set share_data <- TRUE to add the data")
 }
 
 # ==============================================================================
