@@ -1,63 +1,45 @@
-# 🌽 Partial Factor Productivity of Nitrogen (PFP-N) in Malawi
+# 🌾 PFP-N of Maize in Malawi
 
-<div align="center">
+**Partial factor productivity of nitrogen (PFP-N) for sole maize in Malawi: data compilation, robustness checks, response curves, random forests and spatial–temporal patterns**
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![R](https://img.shields.io/badge/R-%3E%3D4.3-276DC3?logo=r)](https://www.r-project.org/)
-[![Data: LSMS-ISA](https://img.shields.io/badge/data-LSMS--ISA-0072BC)](https://www.worldbank.org/en/programs/lsms)
-[![Vocabulary: terminag](https://img.shields.io/badge/vocabulary-terminag-2E8B57)](https://github.com/controvoc/terminag)
-[![Trials: Carob](https://img.shields.io/badge/trials-Carob-8B4513)](https://carob-data.org/)
-
-**How does the partial factor productivity of nitrogen vary across space and time in Malawi?**
-
-*Five LSMS-ISA survey rounds (2010–2025) · Carob on-farm and on-station trials · terminag-standardised variables · Word and HTML report regenerated on every run*
-
-</div>
+_Harmonized from five LSMS-ISA waves plus LCAS, Carob, EiA and RHoMIS · ~thousands of georeferenced plot-crops · one reproducible R pipeline_
 
 ---
 
 ## 📋 Overview
 
-This workflow harmonises Malawi's Integrated Household Surveys (IHS3–IHS6) and the 2013 round of the Integrated Household Panel Survey (IHPS) with agronomic trials compiled by [Carob](https://carob-data.org/). It also has an optional link to [LCAS](https://systems-agronomy.github.io/lcas/) surveys. Everything is put into one plot-level dataset with [terminag](https://github.com/controvoc/terminag) variable names, which is then used to study the **partial factor productivity of nitrogen**:
+This project measures how much maize grain Malawian farmers produce per kilogram of mineral nitrogen applied (PFP-N = yield / N rate, kg grain per kg N) and how that ratio varies across space, time and data sources.
 
-$$\text{PFP-N} = \frac{\text{grain yield (kg/ha)}}{\text{mineral N applied (kg N/ha)}}$$
+The pipeline has four stages:
 
-Before answering the research question, the workflow assesses how robust the data are: by quality flag, by source (survey, on-farm trial, on-station trial) and by place. It also tests whether trials can serve as a benchmark for the quality of the survey data.
+1. **Variable lookup** — every source variable is listed explicitly per survey wave and checked against the World Bank DDI codebook before any data are read.
+2. **Compilation** — LSMS, LCAS, Carob, EiA and RHoMIS are harmonized to terminag names; yields, N rates and PFP-N are derived with documented conversion tables.
+3. **Analysis 1** — data robustness (plot area, fertilizer quantities, harvest measurement, trials as benchmarks) and space–time patterns (robust GAMs, variance components, sensitivity of wave effects).
+4. **Analysis 2** — PFP-N response curves to N rate (Eq 02 hyperbolic vs exponential), random forests with three cross-validation schemes, SHAP values, prediction maps, trial-zone comparisons and agronomic use efficiency, plus an automatic HTML/Word report.
 
-| | |
+| 📐 Unit of analysis | Plot-crop × yield measurement (farmer report / crop cut / experiment) |
 |---|---|
-| 🌾 **Crop / unit** | Sole maize · one row per plot-crop × yield source |
-| 🗓️ **Survey rounds** | IHS3 2010/11 · IHPS 2013 · IHS4 2016/17 · IHS5 2019/20 · IHS6 2024/25 |
-| 🧪 **Trials** | Carob `agronomy` and `survey` collections, filtered to Malawi |
-| 📏 **N window** | 10–300 kg N/ha (PFP-N is unstable below, implausible above) |
-| 📐 **Response curves** | Hyperbolic (Eq 02) vs exponential, with marginal response and bootstrap CIs |
-| 🤖 **Machine learning** | Random forests (`caret` + `ranger`), random / spatial-block / leave-one-wave-out CV, SHAP for every plot |
-| 🎯 **Efficiency** | AUE-N from trial controls and from propensity-score matching of survey plots |
-| 📄 **Report** | `pfpn_report.docx` + `pfpn_report.html`, numbers, tables and figures regenerated each run |
+| 🌾 Focus crop | Sole maize only (intercrops dropped or flagged) |
+| 🧪 Nitrogen | Mineral N only; organic inputs kept as covariates |
+| 🇲🇼 Spatial extent | Malawi (LSMS EA coordinates, plot GPS, district centroids flagged) |
+| 🗓️ Time span | 2010/11 → 2024/25 |
+| 📚 Datasets | LSMS IHS3 2010/11 · IHPS 2013 · IHS4 2016/17 · IHS5 2019/20 · IHS6 2024/25 · LCAS · Carob (agronomy + survey) · EiA 2022 · RHoMIS |
+| 🤖 Models | Robust GAMs (scaled-t) · GLMM variance components · Random forest (ranger via caret) · SHAP |
+| 📦 Language | R |
 
 ---
 
 ## 🚀 Quick Start
 
+Run everything from the scripts folder:
+
 ```r
-# 1. Install the packages (once)
-install.packages(c("tidyverse", "xml2", "readxl", "haven", "sf", "terra", "geodata",
-                   "mgcv", "glmmTMB", "quantreg", "caret", "ranger", "iml",
-                   "emmeans", "multcomp", "multcompView", "MatchIt",
-                   "patchwork", "scales", "rmarkdown", "knitr"))
-
-# 2. Edit two things (see "What you must edit" below):
-#    - run_all.R      : pfpn_root <- ".."
-#    - pfpn_compile.R : paths to your five LSMS .zip files
-
-# 3. Run everything from the scripts folder
-setwd("path/to/PFP_N_MWI/pfpn_scripts")
+# In R, with the scripts folder as the working directory
 source("run_all.R")
 ```
 
-The report appears at `PFP_N_MWI/pfpn_analysis_2/pfpn_report.docx` (and `.html`).
 
-> ⏱️ The **first run** downloads codebooks, trials and covariates and fits the random forests and SHAP values for every plot. Expect **an hour or more**. Later runs reuse everything already downloaded.
+> ⏱️ The **first run** downloads codebooks, trials and covariates and fits the random forests and SHAP values for every plot. Later runs reuse everything already downloaded.
 
 ---
 
@@ -68,7 +50,7 @@ The scripts live in `pfpn_scripts/`. All other folders are **created by the scri
 ```
 MWI_maiz_PFP_N/                    ← project root  (pfpn_root = ".." seen from pfpn_scripts/)
 │
-├── pfpn_scripts/                  ← YOU KEEP THESE · working directory when running
+├── pfpn_scripts/                  ← the scripts to keep · working directory when running
 │   ├── run_all.R                  # runs the four steps in order
 │   ├── 00.fpn_utils.R             # shared helpers (paths, downloads, letters, SHAP, ...)
 │   ├── 01.pfpn_variable_lookup.R  # step 1 · variable spec checked against each codebook
@@ -83,7 +65,7 @@ MWI_maiz_PFP_N/                    ← project root  (pfpn_root = ".." seen from
 │   ├── data_dictionary_<wave>.csv #   full variable list of the files used, per wave
 │   └── value_labels.csv, *_stub.csv
 │
-├── pfpn_config/                   ← ✋ CURATED BY YOU · back it up
+├── pfpn_config/                   ← ✋ MAINTAINED BY THE USER · back it up
 │   ├── source_map.csv             #   which source variable plays which role
 │   ├── harvest_unit_kg.csv        #   harvest units → kg
 │   ├── fert_unit_kg.csv           #   fertilizer units → kg
@@ -111,22 +93,22 @@ MWI_maiz_PFP_N/                    ← project root  (pfpn_root = ".." seen from
 │   ├── pfpn_report.docx           #   📄 THE REPORT
 │   └── pfpn_report.html
 │
-└── covariates/                    ← optional: drop your own GeoTIFFs here (file name = predictor name)
+└── covariates/                    ← optional: user-provided GeoTIFFs (file name = predictor name)
 │
 ├── LICENSE
 └── README.md
 ```
 
-> 🗑️ You can delete `pfpn_lookup/`, `pfpn_compiled/`, `pfpn_analysis/` and `pfpn_analysis_2/` at any time: they are rebuilt.
-> ✋ **Do not delete `pfpn_config/` or `covariates/`** without a backup. They hold values you typed in by hand and your own rasters. The scripts would recreate empty stubs, but your entries would be lost.
+> 🗑️ The folders `pfpn_lookup/`, `pfpn_compiled/`, `pfpn_analysis/` and `pfpn_analysis_2/` can be deleted at any time: they are rebuilt.
+> ✋ **`pfpn_config/` and `covariates/` must not be deleted** without a backup. They hold values entered by hand and user-provided rasters. The scripts would recreate empty stubs, but those entries would be lost.
 
 The LSMS zip files can live **anywhere**, even outside the project. Their paths are set in `pfpn_compile.R`.
 
 ---
 
-## ✏️ What You Must Edit
+## ✏️ What Must Be Edited
 
-Only two places need changing before the first run.
+Only two places **must** be changed before the first run. Two optional sources (EiA 2022 and RHoMIS) need a path of their own if they are to be included (see *Optional sources* below).
 
 ### 1. `run_all.R`: where the output folders go
 
@@ -150,8 +132,31 @@ lsms_mwi_2024_zip <- '.../MWI_2024-2025_IHS-VI_v01_M_STATA14.zip'
 
 - **Relative paths are resolved from `pfpn_scripts/`** (the working directory), not from the project root.
 - Full paths are the safest choice. Use forward slashes, even on Windows: `'C:/Users/me/data/MWI_2019_IHS-V_v06_M_Stata.zip'`.
-- **Keep the zips exactly as downloaded.** The scripts read the `.dta` files directly from them, and handle the IHS3 zip, which holds both a `Full_Sample/` and a `Panel/` copy (the full sample is used).
+- **The zips must be kept exactly as downloaded.** The scripts read the `.dta` files directly from them, and handle the IHS3 zip, which holds both a `Full_Sample/` and a `Panel/` copy (the full sample is used).
 - A wave whose zip is not found is **skipped with a message**, not silently.
+
+### Optional sources: EiA 2022 and RHoMIS
+
+Both are off by default (`NA`). A path must be set to include them; leaving `NA` skips them.
+
+```r
+# in pfpn_compile.R
+eia_xlsx      <- '../../../Pele_Mele/EiA_2022_survey_2025-09-26_v0.xlsx'   # local path
+eia_countries <- "Malawi"                                                   # NULL keeps all countries
+eia_yield_moisture <- 12   # % moisture to convert crop-cut dry matter to (NA = keep dry matter)
+
+rhomis_csv       <- NA     # local path, e.g. "../../data/RHoMIS_Full_Data.csv"
+rhomis_countries <- "Malawi"
+```
+
+| Source | Where to get it | Notes |
+|---|---|---|
+| **EiA 2022 maize survey** | CIMMYT Dataverse, **doi:10.71682/10549347**. The terms of use must be accepted at download; save the workbook (sheets `maize_clean_data` + `raw_survey_data`). | Crop-cut yields, geotraced field area, N rate per field, field GPS. The workbook name in the script is only a suggestion — any local name works. |
+| **RHoMIS** | Harvard Dataverse, **doi:10.7910/DVN/WS38SA** (CC0). The full CSV with the codebook's column names must be downloaded. | Household-level fertilizer and land, not per crop. N rate is computed only where fertilizer went to maize alone and one product was used (rows flagged `household_level_N_and_area`). |
+
+- Relative paths are resolved from `pfpn_scripts/`, like the LSMS zips.
+- If a path is set but the file is not there, the source is skipped with a message: `EiA workbook not found, skipped: <path>` / `RHoMIS file not found, skipped: <path>`.
+- If the path is `NA`, the source is skipped with a message: `RHoMIS not used (rhomis_csv is NA) …`.
 
 ### Optional settings
 
@@ -172,13 +177,17 @@ lsms_mwi_2024_zip <- '.../MWI_2024-2025_IHS-VI_v01_M_STATA14.zip'
 
 All resources are **free**. The LSMS microdata need a free account and acceptance of the terms of use. Everything else is downloaded automatically.
 
-### 🔑 Manual download (free account, login required)
+### 🔑 Manual download
 
-**Malawi LSMS-ISA microdata: World Bank Microdata Library**
+**EiA 2022 maize survey (no login).** CIMMYT Dataverse, doi:10.71682/10549347. The terms of use must be accepted at download, then `eia_xlsx` in `pfpn_compile.R` must point at the workbook.
 
-1. Create a free account at <https://microdata.worldbank.org> and sign in.
-2. Open each study page below, go to the **Get Microdata** tab, accept the terms of use, and download the **Stata** version.
-3. Save the zip files anywhere, and put their paths in `pfpn_compile.R`.
+**RHoMIS (no login, CC0).** Harvard Dataverse, doi:10.7910/DVN/WS38SA. The full CSV must be downloaded and `rhomis_csv` in `pfpn_compile.R` must point at it.
+
+**Malawi LSMS-ISA microdata (free account, login required).**
+
+1. A free account must be created at <https://microdata.worldbank.org> and signed in to.
+2. Each study page below must be opened, the **Get Microdata** tab selected, the terms of use accepted, and the **Stata** version downloaded.
+3. The zip files can be saved anywhere; their paths go into `pfpn_compile.R`.
 
 | Round | Study page | Variable documentation | Used for |
 |---|---|---|---|
@@ -203,12 +212,12 @@ All resources are **free**. The LSMS microdata need a free account and acceptanc
 | SoilGrids (pH, SOC, N, clay) | [soilgrids.org](https://soilgrids.org/) via `geodata` | step 4 | `pfpn_compiled/raw/covariates/` |
 | CHIRPS monthly rainfall | [chc.ucsb.edu/data/chirps](https://www.chc.ucsb.edu/data/chirps) | step 4 | `pfpn_compiled/raw/covariates/` |
 
-If a download fails (no internet, server down), the step **continues without that resource** and says so; the codebooks are the only exception. For a codebook, the script stops and tells you where to download it by hand: from the study page, save the **DDI/XML** metadata export as `pfpn_lookup/raw/ddi_<id>.xml`.
+If a download fails (no internet, server down), the step **continues without that resource** and says so; the codebooks are the only exception. For a codebook, the script stops and reports where to download it by hand: from the study page, the **DDI/XML** metadata export must be saved as `pfpn_lookup/raw/ddi_<id>.xml`.
 
 ### 📦 Optional
 
-- **LCAS survey data.** Obtain the datasets as described on the [LCAS website](https://systems-agronomy.github.io/lcas/), rename the columns with its `rename_lcas.R`, and list each file in `lcas_datasets` in `pfpn_compile.R`.
-- **Your own rasters.** Any GeoTIFF in `covariates/` becomes a random-forest predictor named after the file.
+- **LCAS survey data.** The datasets are obtained as described on the [LCAS website](https://systems-agronomy.github.io/lcas/), their columns renamed with `rename_lcas.R`, and each file listed in `lcas_datasets` in `pfpn_compile.R`.
+- **User-provided rasters.** Any GeoTIFF placed in `covariates/` becomes a random-forest predictor named after the file.
 
 ---
 
@@ -216,12 +225,12 @@ If a download fails (no internet, server down), the step **continues without tha
 
 | Step | Script | What it does | Main outputs |
 |---|---|---|---|
-| 1 | `pfpn_variable_lookup.R` | Lists, per survey round, the variables needed (household, plot, crop, harvest, area, fertilizer type, quantity, unit, enumerator kg, organic inputs, location). It checks each against that round's codebook: does it exist, and does its label match? | `pfpn_lookup/spec_check.csv`, `pfpn_config/source_map.csv` (written only if absent) |
+| 1 | `pfpn_variable_lookup.R` | Lists, per survey round, the variables needed (household, plot, crop, harvest, area, fertilizer type, quantity, unit, enumerator kg, organic inputs, location). Each is checked against that round's codebook: does it exist, and does its label match? | `pfpn_lookup/spec_check.csv`, `pfpn_config/source_map.csv` (written only if absent) |
 | 2 | `pfpn_compile.R` | Reads the `.dta` files from the zips. Converts harvest, fertilizer and area units, computes N from product N contents, and keeps sole crops. Takes EA coordinates (or district centroids for IHS6), removes coordinates outside Malawi, adds Carob trials, and labels every column. | `pfpn_compiled/pfpn_unified.rds` + dictionary + data-quality statement |
 | 3 | `pfpn_analysis.R` | Data robustness: quality flags, reported vs GPS area, fertilizer kg checks, a trial yield frontier, robust GAMs over space and time, variance components and sensitivity analyses | `pfpn_analysis/` |
 | 4 | `pfpn_analysis_2.R` | Coverage funnel per wave; violin + box plots with ANOVA/emmeans letters; Eq 02 vs exponential response curves; random forests with three CV schemes; SHAP for every plot; trial zones and AUE-N with propensity-score matching. Renders the report. | `pfpn_analysis_2/`, `pfpn_report.docx/.html` |
 
-Run a single step on its own (once the earlier steps have run at least once):
+A single step can be run on its own (once the earlier steps have run at least once):
 
 ```r
 setwd("path/to/PFP_N_MWI/pfpn_scripts")
@@ -231,9 +240,9 @@ source("pfpn_analysis_2.R")
 
 ---
 
-## 🧭 Your Part: Curating `pfpn_config/`
+## 🧭 Maintaining `pfpn_config/`
 
-After each run of step 2, check **`pfpn_compiled/missing_conversions.csv`**. It lists every unit, product or category that has no conversion value yet. Fill in the empty cells in the corresponding file in `pfpn_config/`, then run again. New labels found in the data are **appended** to these files; your entries are never overwritten.
+After each run of step 2, **`pfpn_compiled/missing_conversions.csv`** should be checked. It lists every unit, product or category that has no conversion value yet. The empty cells are filled in the corresponding file in `pfpn_config/`, then the step is run again. New labels found in the data are **appended** to these files; existing entries are never overwritten.
 
 | File | Fill in | Example |
 |---|---|---|
@@ -246,7 +255,7 @@ After each run of step 2, check **`pfpn_compiled/missing_conversions.csv`**. It 
 
 Labels such as "50 KG BAG", "KILOGRAM", "ACRE" and N:P:K grades are pre-filled automatically. Local units (pails, ox-carts, basins) need the official IHS conversion factors.
 
-Also review **`pfpn_lookup/spec_check.csv`**: `label_mismatch` rows deserve a look (the variable exists but its label is unexpected), and `missing` rows become `TODO` in `source_map.csv` and are skipped.
+**`pfpn_lookup/spec_check.csv`** should also be reviewed: `label_mismatch` rows deserve a look (the variable exists but its label is unexpected), and `missing` rows become `TODO` in `source_map.csv` and are skipped.
 
 ---
 
@@ -282,10 +291,10 @@ Also review **`pfpn_lookup/spec_check.csv`**: `label_mismatch` rows deserve a lo
 |---|---|
 | `LSMS zip not found, wave skipped` | Wrong path in `pfpn_compile.R`. Relative paths start from `pfpn_scripts/`. |
 | `No LSMS or LCAS source could be read` | None of the zip paths is right. |
-| `No usable DDI codebook for catalog <id>` | Codebook download failed. Save the DDI/XML export by hand as `pfpn_lookup/raw/ddi_<id>.xml`. |
+| `No usable DDI codebook for catalog <id>` | Codebook download failed. The DDI/XML export must be saved by hand as `pfpn_lookup/raw/ddi_<id>.xml`. |
 | A wave is missing from the figures | Open `pfpn_analysis_2/figures/1_wave_coverage_funnel.png`: it shows the step where the wave loses its rows. |
 | Few or no yields for a wave | Harvest units without kg weights. Fill in `pfpn_config/harvest_unit_kg.csv`. |
-| `Districts without a centroid match` | Add the district name to `district_aliases` in `pfpn_utils.R`. |
+| `Districts without a centroid match` | The district name must be added to `district_aliases` in `pfpn_utils.R`. |
 | `rm(list = ls())` at the top of scripts | Supported: each step runs in its own environment. |
 
 ---
@@ -304,19 +313,18 @@ The full reference list is in the report.
 
 ## 📝 Citation
 
-No DOI has been assigned to this workflow yet; one will be added here if the workflow is deposited. Until then, please cite the repository and the data sources listed below.
+No DOI has been assigned to this workflow yet; one will be added here if the workflow is deposited.
 
-The workflow (scripts, report template and README) was developed by D. Hougni (CIMMYT) with assistance from Claude AI (Anthropic, 2026).
 
 ---
 
 ## 📄 License
 
-The **code** in this repository (R scripts, report template and documentation) is released under the **GNU General Public License v3.0** ([GPL-3.0](https://www.gnu.org/licenses/gpl-3.0)). You may use, modify and redistribute it; derived works must be distributed under the same licence.
+The **code** in this repository (R scripts, report template and documentation) is released under the **GNU General Public License v3.0** ([GPL-3.0](https://www.gnu.org/licenses/gpl-3.0)). It may be used, modified and redistributed; derived works must be distributed under the same licence.
 
 ### Reused data
 
-**No data are redistributed with this workflow.** The scripts download or read every dataset from its original provider, and each dataset remains subject to its **own licence and terms of use**, which users must accept and respect, including any citation requirements:
+**No data are redistributed with this workflow.** The scripts download or read every dataset from its original provider, and each dataset remains subject to its **own licence and terms of use**, which must be accepted and respected, including any citation requirements:
 
 | Data | Provider | Terms |
 |---|---|---|
@@ -324,6 +332,8 @@ The **code** in this repository (R scripts, report template and documentation) i
 | DDI codebooks and data dictionaries | World Bank Microdata Library | see the Microdata Library's terms |
 | LCAS module forms and survey data | [LCAS](https://systems-agronomy.github.io/lcas/) | see the LCAS website and each dataset's licence |
 | Carob trial collections | [Carob](https://carob-data.org/) | each Carob dataset keeps the licence of its original publication; cite the original datasets |
+| EiA 2022 maize survey | CIMMYT Dataverse (doi:10.71682/10549347) | terms of use accepted at download |
+| RHoMIS | Harvard Dataverse (doi:10.7910/DVN/WS38SA) | CC0 |
 | terminag vocabulary | [controvoc/terminag](https://github.com/controvoc/terminag) | see the repository's licence |
 | GADM boundaries | [GADM](https://gadm.org/) | see the GADM licence |
 | Elevation and climate | [WorldClim](https://www.worldclim.org/) | see WorldClim's terms |
@@ -338,6 +348,7 @@ The GPL-3.0 licence of the code does not extend to any of these datasets, nor to
 
 * 🏢  **D. Hougni (CIMMYT):** d.hougni@cgiar.org
 * 📧  **D. Hougni (Personal):** shadowhgni@yahoo.fr
+* 🐛 **Issues:** github.com/shadowhgni/MWI_maiz_PFP_N/issues
 
 ---
 
