@@ -348,7 +348,7 @@ The GPL-3.0 licence of the code does not extend to any of these datasets, nor to
 
 * 🏢  **D. Hougni (CIMMYT):** d.hougni@cgiar.org
 * 📧  **D. Hougni (Personal):** shadowhgni@yahoo.fr
-* 🐛 **Issues:** github.com/shadowhgni/MWI_maiz_PFP_N/issues
+* 🐛 **Issues:** [github.com/shadowhgni/MWI_maiz_PFP_N/issues](https://github.com/shadowhgni/MWI_maiz_PFP_N/issues)
 
 ---
 
